@@ -4,7 +4,7 @@ $VERBOSE = false
 require 'active_record'
 require 'sqlite3'
 require 'workflow'
-require 'mocha'
+require 'mocha/setup'
 require 'stringio'
 #require 'ruby-debug'
 
@@ -14,7 +14,7 @@ class Order < ActiveRecord::Base
   include Workflow
   workflow do
     state :submitted do
-      event :accept, :transitions_to => :accepted, :meta => {:doc_weight => 8} do |reviewer, args|
+      event :accept, :transitions_to => :accepted, :meta => {:weight => 8} do |reviewer, args|
       end
     end
     state :accepted do
@@ -31,7 +31,7 @@ class LegacyOrder < ActiveRecord::Base
 
   workflow do
     state :submitted do
-      event :accept, :transitions_to => :accepted, :meta => {:doc_weight => 8} do |reviewer, args|
+      event :accept, :transitions_to => :accepted, :meta => {:weight => 8} do |reviewer, args|
       end
     end
     state :accepted do
@@ -244,17 +244,6 @@ class MainTest < ActiveRecordTestCase
     assert !o.shipped?
   end
 
-  unless RUBY_VERSION < '1.9'
-    test 'compare states' do
-      o = assert_state 'some order', 'accepted'
-      assert o.current_state < :shipped
-      assert o.current_state > :submitted
-      assert_raise ArgumentError do
-        o.current_state > :unknown
-      end
-    end
-  end
-
   test 'correct exception for event, that is not allowed in current state' do
     o = assert_state 'some order', 'accepted'
     assert_raise Workflow::NoTransitionAllowed do
@@ -279,8 +268,68 @@ class MainTest < ActiveRecordTestCase
         end
         state :two
       end
+
+      private
+      def another_transition(args)
+        args.another_tran
+      end
     end
-    c.new.my_transition!(args)
+    a = c.new
+    a.my_transition!(args)
+  end
+
+  test '#53 Support for non public transition callbacks' do
+    args = mock()
+    args.expects(:log).with('in private callback').once
+    args.expects(:log).with('in protected callback in the base class').once
+
+    b = Class.new # the base class with a protected callback
+    b.class_eval do
+      protected
+      def assign_old(args)
+        args.log('in protected callback in the base class')
+      end
+    end
+
+    c = Class.new(b) # inheriting class with an additional protected callback
+    c.class_eval do
+      include Workflow
+      workflow do
+        state :new do
+          event :assign, :transitions_to => :assigned
+          event :assign_old, :transitions_to => :assigned_old
+        end
+        state :assigned
+        state :assigned_old
+      end
+
+      private
+      def assign(args)
+        args.log('in private callback')
+      end
+    end
+
+    a = c.new
+    a.assign!(args)
+
+    a2 = c.new
+    a2.assign_old!(args)
+  end
+
+  test '#58 Limited private transition callback lookup' do
+    args = mock()
+    c = Class.new
+    c.class_eval do
+      include Workflow
+      workflow do
+        state :new do
+          event :fail, :transitions_to => :failed
+        end
+        state :failed
+      end
+    end
+    a = c.new
+    a.fail!(args)
   end
 
   test 'Single table inheritance (STI)' do
@@ -389,8 +438,8 @@ class MainTest < ActiveRecordTestCase
   test 'diagram generation' do
     begin
       $stdout = StringIO.new('', 'w')
-      Workflow::create_workflow_diagram(Order, 'doc')
-      assert_match(/open.+\.pdf/, $stdout.string,
+      Workflow::Draw::workflow_diagram(Order, :path => '/tmp')
+      assert_match(/run the following/, $stdout.string,
         'PDF should be generate and a hint be given to the user.')
     ensure
       $stdout = STDOUT
@@ -468,17 +517,17 @@ class MainTest < ActiveRecordTestCase
   end
 
   test 'workflow graph generation' do
-    Dir.chdir('tmp') do
+    Dir.chdir('/tmp') do
       capture_streams do
-        Workflow::create_workflow_diagram(Order)
+        Workflow::Draw::workflow_diagram(Order, :path => '/tmp')
       end
     end
   end
 
-  test 'workflow graph generation in path with spaces' do
+  test 'workflow graph generation in a path with spaces' do
     `mkdir -p '/tmp/Workflow test'`
     capture_streams do
-      Workflow::create_workflow_diagram(Order,  '/tmp/Workflow test')
+      Workflow::Draw::workflow_diagram(Order, :path => '/tmp/Workflow test')
     end
   end
 
